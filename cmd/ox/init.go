@@ -140,7 +140,7 @@ across your whole team (Claude, Codex, Amp, etc.).`,
 
 func init() {
 	initCmd.Flags().BoolVarP(&initQuiet, "quiet", "q", false, "suppress non-essential output (default: false)")
-	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team ID to associate this repo with")
+	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team to associate this repo with (name, slug, or ID)")
 	initCmd.Flags().BoolVar(&initForce, "force", false, "initialize even if .sageox/ exists on remote")
 	initCmd.Flags().StringVar(&initEndpointFlag, "endpoint", "", "SageOx endpoint URL (overrides SAGEOX_ENDPOINT)")
 	initCmd.Flags().StringVar(&initAgentsFlag, "agents", "", "comma-separated list of agents to configure (e.g., 'gemini,codex')")
@@ -412,12 +412,23 @@ func runInit() error {
 	var selectedTeamID string
 	var selectedTeamName string
 	if initTeamFlag != "" {
-		// use explicitly provided team
-		selectedTeamID = initTeamFlag
-		// best-effort: resolve the display name so config.json's team_name
-		// isn't left empty, which degrades every downstream label to the
-		// raw team_xxx id. Never blocks or fails init.
-		selectedTeamName = teamNameForID(selectedTeamID)
+		selectedTeamID = strings.TrimSpace(initTeamFlag)
+		// --team has always taken the raw flag value and sent it to the API. Resolving
+		// it against the user's actual teams first means the slug `ox team list` prints
+		// and the name the picker shows both work here, matching every other team-taking
+		// surface, and a typo fails now rather than as an HTTP 400 after init has already
+		// modified the working tree. A failed fetch falls through with the raw value: a
+		// degraded network should not make --team unusable.
+		if memberships, err := fetchTeamMemberships(); err != nil {
+			slog.Debug("could not fetch teams to resolve --team; passing the value through", "error", err)
+		} else if len(memberships) > 0 {
+			match := resolveTeamMembership(memberships, initTeamFlag)
+			if match == nil {
+				return fmt.Errorf("unknown team %q\n\nYour teams: %s", strings.TrimSpace(initTeamFlag), formatTeamCandidates(memberships))
+			}
+			selectedTeamID = match.ID
+			selectedTeamName = match.Name
+		}
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()
@@ -2555,32 +2566,6 @@ func selectInitEndpoint() (string, bool) {
 	}
 
 	return selectedEp.URL, false
-}
-
-// teamNameForID best-effort resolves a team ID to its display name via the
-// API, so --team <id> doesn't leave config.json's team_name empty (every
-// downstream label then falls back to the raw team_xxx id). Returns "" on
-// any failure — this must never block or fail ox init.
-func teamNameForID(teamID string) string {
-	if teamID == "" {
-		return ""
-	}
-	token, err := auth.EnsureValidToken(300)
-	if err != nil || token == nil || token.AccessToken == "" {
-		return ""
-	}
-	client := api.NewRepoClient()
-	client.WithAuthToken(token.AccessToken)
-	reposResp, err := client.GetRepos()
-	if err != nil || reposResp == nil {
-		return ""
-	}
-	for _, team := range reposResp.TeamMembershipsFromRepos() {
-		if team.ID == teamID {
-			return team.Name
-		}
-	}
-	return ""
 }
 
 // teamSortKey returns the case-insensitive label a team sorts by: its
