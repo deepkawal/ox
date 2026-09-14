@@ -421,6 +421,15 @@ func runInit() error {
 		// this point, so validating earlier still would require hoisting the endpoint
 		// and auth blocks above it. Tracked separately in #857.
 		memberships, fetchErr := fetchTeamMemberships()
+		if fetchErr != nil {
+			// The picker path below reports a failed fetch and asks whether to
+			// continue. This path cannot ask — --team is the non-interactive way in
+			// — but it must not degrade silently either: the value is about to reach
+			// the server unvalidated. The error body is server text, so it is
+			// sanitized before it touches the terminal.
+			cli.PrintWarning(fmt.Sprintf("Could not check --team against your teams: %s",
+				cli.SanitizeTerminalText(fetchErr.Error())))
+		}
 		resolvedID, resolvedName, err := resolveTeamFlag(initTeamFlag, memberships, fetchErr)
 		if err != nil {
 			return err
