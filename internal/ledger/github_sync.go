@@ -326,10 +326,12 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 	}
 
 	// Deduplicate: when multiple hash-variant files exist for the same PR,
-	// keep only the path with the latest updated_at.
+	// keep only the path with the latest updated_at, preferring the variant
+	// that still lacks commits when that ties (see below).
 	type prPathInfo struct {
-		path      string
-		updatedAt time.Time
+		path       string
+		updatedAt  time.Time
+		hasCommits bool
 	}
 	bestByNumber := make(map[int]prPathInfo)
 
@@ -341,17 +343,32 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		}
 
 		var stub struct {
-			Number    int       `json:"number"`
-			UpdatedAt time.Time `json:"updated_at"`
+			Number    int               `json:"number"`
+			UpdatedAt time.Time         `json:"updated_at"`
+			Commits   []json.RawMessage `json:"commits"`
 		}
 		if err := json.Unmarshal(data, &stub); err != nil {
 			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
 			continue
 		}
 
+		cand := prPathInfo{path: path, updatedAt: stub.UpdatedAt, hasCommits: len(stub.Commits) > 0}
 		prev, exists := bestByNumber[stub.Number]
-		if !exists || stub.UpdatedAt.After(prev.updatedAt) {
-			bestByNumber[stub.Number] = prPathInfo{path: path, updatedAt: stub.UpdatedAt}
+
+		// On a tie, prefer the snapshot that still lacks commits. A ledger
+		// written before the supersede below existed can hold both variants of
+		// one GitHub state, and their updated_at is identical by construction.
+		// Picking the enriched one there would make this loop skip the PR (it
+		// already has commits) and strand the commit-less duplicate on disk
+		// forever — exactly the tie a reader can lose. Picking the commit-less
+		// one re-runs the enrichment and lets the supersede clean it up, so an
+		// already-broken ledger heals on the next backfill instead of needing
+		// the writer to have been fixed before the files were written.
+		better := !exists ||
+			cand.updatedAt.After(prev.updatedAt) ||
+			(cand.updatedAt.Equal(prev.updatedAt) && prev.hasCommits && !cand.hasCommits)
+		if better {
+			bestByNumber[stub.Number] = cand
 		}
 	}
 
