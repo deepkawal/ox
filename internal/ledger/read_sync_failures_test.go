@@ -187,23 +187,25 @@ func TestReadSyncRejectsBrokenCommitHistory(t *testing.T) {
 // Failure prevented: non-regular or unexpectedly missing tracked content is
 // silently overwritten instead of preserving local changes for the coworker.
 func TestReadSyncRejectsDamagedTrackedContent(t *testing.T) {
+	const tracked = "sessions/old/session.md"
 	for _, tc := range []struct {
 		name, errorClass string
+		detail           *ReadFailureDetail
 		damage           func(*testing.T, *readFixture, string)
 	}{
-		{"missing file", "dirty", func(t *testing.T, f *readFixture, path string) { require.NoError(t, os.Remove(path)) }},
-		{"directory replaces file", "dirty", func(t *testing.T, f *readFixture, path string) {
+		{"missing file", "dirty", nil, func(t *testing.T, f *readFixture, path string) { require.NoError(t, os.Remove(path)) }},
+		{"directory replaces file", "dirty", nil, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.Remove(path))
 			require.NoError(t, os.Mkdir(path, 0700))
 		}},
-		{"staged work", "dirty", func(t *testing.T, f *readFixture, path string) {
+		{"staged work", "dirty", nil, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte("staged local work"), 0600))
 			readTestGit(t, f.opts.Path, "add", "--", path)
 		}},
-		{"malformed stub", "missing_hydration", func(t *testing.T, f *readFixture, path string) {
+		{"malformed stub", "missing_hydration", &ReadFailureDetail{Reason: "malformed_pointer", Path: tracked}, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:invalid\nsize not-a-number\n"), 0600))
 		}},
-		{"different stub", "missing_hydration", func(t *testing.T, f *readFixture, path string) {
+		{"different stub", "missing_hydration", &ReadFailureDetail{Reason: "nested_stub", Path: tracked}, func(t *testing.T, f *readFixture, path string) {
 			require.NoError(t, os.WriteFile(path, []byte(lfs.FormatPointer("sha256:"+lfs.ComputeOID([]byte("new")), 3)), 0600))
 		}},
 	} {
@@ -211,11 +213,12 @@ func TestReadSyncRejectsDamagedTrackedContent(t *testing.T) {
 			f := newReadFixture(t)
 			ctx := context.Background()
 			require.True(t, ReadSync(ctx, f.opts).Ready)
-			path := filepath.Join(f.opts.Path, "sessions/old/session.md")
+			path := filepath.Join(f.opts.Path, tracked)
 			tc.damage(t, f, path)
 			result := ReadSync(ctx, f.opts)
 			require.False(t, result.Ready)
 			require.Equal(t, tc.errorClass, result.ErrorClass)
+			require.Equal(t, tc.detail, result.ErrorDetail)
 		})
 	}
 }
@@ -250,8 +253,9 @@ func TestReadSyncObjectMaterializationFailuresLeaveDestinationUntouched(t *testi
 			localRef := ref
 			rel := tc.prep(t, root, &localRef)
 			path := filepath.Join(root, rel)
-			err := materializeReadObject(context.Background(), action, root, rel, localRef)
+			landed, err := materializeReadObject(context.Background(), newReadLimiter(), action, root, rel, localRef)
 			require.Error(t, err)
+			require.False(t, landed, "nothing reached the destination")
 			if tc.name == "size mismatch" {
 				require.EqualError(t, err, "missing_hydration")
 				var failure *readFailure
@@ -318,6 +322,31 @@ func TestReadSyncDehydrationRetainsVerifiedObjectsAcrossRetries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Failure prevented: a refresh that cannot list the revision it is moving to
+// still turns hydrated files back into pointers, so the failed refresh costs
+// every one of those objects a download again.
+func TestReadSyncDehydrationStopsWhenItsTargetCannotBeListed(t *testing.T) {
+	const path = "sessions/kept/raw.jsonl"
+	content := []byte("hydrated before the refresh\n")
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		_, _ = w.Write(content)
+	})
+	commitReadLFSPointer(t, f, path, content)
+	ctx := context.Background()
+	require.True(t, ReadSync(ctx, f.opts).Ready)
+	transport, err := gitserver.NewReadTransport(f.opts.Endpoint, f.opts.RepoID, f.opts.ReadURL)
+	require.NoError(t, err)
+
+	require.Error(t, dehydrateReadFiles(ctx, transport, f.opts.Path, "refs/ox/missing", sparseCheckoutDirs()))
+	kept, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+	require.NoError(t, err)
+	require.Equal(t, content, kept, "the hydrated object stays in place")
 }
 
 // Failure prevented: Git's stat cache or the pointer-size optimization hides
