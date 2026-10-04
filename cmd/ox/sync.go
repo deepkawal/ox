@@ -92,16 +92,42 @@ var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Args:  cobra.NoArgs,
 	Short: "Manually sync ledger/team contexts (rarely needed)",
-	Long: `Manually synchronize your Ledger and Team Context, then converge the
+	Long:  syncLong(),
+	RunE:  runSync,
+}
+
+// `ox sync --help` is assembled from two halves so the Add-on Catalog paragraph
+// between them can be gated. Splitting it is what makes the gate a compile-time
+// guarantee: a hand-spliced anchor string would silently stop matching the day
+// someone reworded the surrounding help.
+const syncLongHead = `Manually synchronize your Ledger and Team Context, then converge the
 current repository with applicable Team Context artifacts.
 
 NOTE: You should RARELY need this command. The background daemon automatically
 keeps transport and local convergence synchronized. This command exists only for:
   - Troubleshooting sync issues
   - Triggering an immediate sync (this command itself forces sync)
-  - Diagnostic purposes
+  - Diagnostic purposes`
 
-The daemon syncs automatically on:
+// syncAddonsHelp states the boundary between convergence and the Add-on Catalog:
+// sync delivers Add-on-managed content but never checks for new catalog releases.
+//
+// It is printed ONLY when the addons gate is on. Unconditionally, it would name an
+// Add-on Catalog this build cannot reach (#1028, #1029); the rule stays recorded in
+// ADR-032 either way.
+//
+// It names `ox addons update`, which is now safe to name: the same gate that
+// prints this paragraph registers that command (syncFeatureGatedCommands in
+// root.go), so the two cannot disagree. The pointer was deliberately absent
+// while the command was still follow-up work — help that sent a user to
+// "unknown command" in exactly the state the flag exists to make safe.
+// TestAddonsHelpNamesNoUnregisteredCommand enforces that pairing in both
+// directions.
+const syncAddonsHelp = `Convergence includes Add-on-managed and hand-authored Team Context content through
+the same delivery path. It does not check the Add-on Catalog for newer releases;
+use 'ox addons update' for catalog updates.`
+
+const syncLongTail = `The daemon syncs automatically on:
   - File changes in your project
   - Periodic intervals (configurable)
   - Session start/end events
@@ -119,8 +145,13 @@ Headless read-only mode runs a bounded ledger refresh without the daemon:
   ox sync --read-only --repo repo_<uuid> --check --json
 
 Read-only mode uses SAGEOX_TOKEN and SAGEOX_ENDPOINT, independent of the
-current project. See docs/specs/ledger-read-sync.md for the reader contract.`,
-	RunE: runSync,
+current project. See docs/specs/ledger-read-sync.md for the reader contract.`
+
+// syncLong assembles `ox sync --help`. The Add-on Catalog paragraph is
+// unconditional: `ox addons` is an ordinary command now, so naming it is
+// always correct.
+func syncLong() string {
+	return syncLongHead + "\n\n" + syncAddonsHelp + "\n\n" + syncLongTail
 }
 
 func init() {
@@ -260,7 +291,7 @@ func writeSyncResultText(w io.Writer, result SyncResult) error {
 		return err
 	}
 	if result.Transport.Ledger != nil {
-		if _, err := fmt.Fprintf(w, "  Ledger: %s\n", result.Transport.Ledger.Status); err != nil {
+		if err := writeLedgerSyncLine(w, *result.Transport.Ledger); err != nil {
 			return err
 		}
 	}
@@ -308,6 +339,18 @@ func writeSyncResultText(w io.Writer, result SyncResult) error {
 	return nil
 }
 
+// writeLedgerSyncLine prints the ledger's transport line. A not-synced ledger
+// carries its reasons on the same line, so the one line a user reads cannot
+// say "synced" while the error below it says otherwise.
+func writeLedgerSyncLine(w io.Writer, ledger SyncLedgerResult) error {
+	if ledger.Status == ledgerSyncStatusNotSynced {
+		_, err := fmt.Fprintf(w, "  Ledger: NOT synced — %s\n", ledger.Error)
+		return err
+	}
+	_, err := fmt.Fprintf(w, "  Ledger: %s\n", ledger.Status)
+	return err
+}
+
 // syncViaDaemon triggers a sync via the daemon.
 // The daemon handles pull operations.
 func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error {
@@ -332,6 +375,21 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 		return fmt.Errorf("daemon sync: %w", err)
 	}
 
+	// The IPC succeeding only means the daemon accepted the request; its ledger
+	// pull returns nil for every skip. Verify before claiming "synced".
+	status, statusErr := ledgerStatusForSync()
+	return recordLedgerSyncVerdict(result, status, statusErr)
+}
+
+// recordLedgerSyncVerdict sets the ledger's transport result from what the
+// daemon status and the ledger on disk actually show, and returns an error
+// whenever that is anything other than "synced".
+func recordLedgerSyncVerdict(result *SyncResult, status *daemon.StatusData, statusErr error) error {
+	if reasons := classifyLedgerSync(gatherLedgerSyncFacts(status, statusErr)); len(reasons) > 0 {
+		msg := ledgerNotSyncedError(reasons)
+		result.Transport.Ledger = &SyncLedgerResult{Status: ledgerSyncStatusNotSynced, Error: msg}
+		return fmt.Errorf("ledger not synced: %s", msg)
+	}
 	result.Transport.Ledger = &SyncLedgerResult{Status: "synced"}
 	return nil
 }

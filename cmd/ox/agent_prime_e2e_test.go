@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestRunAgentPrime_OmitsAnExistingNativeTeamRule(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(env.Root, ".claude", "rules"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(env.Root, ".claude", ".gitignore"),
-		[]byte("rules/sageox-team-*\n"), 0o644))
+		[]byte("rules/*-team.md\n"), 0o644))
 	rules, err := teamdocs.DiscoverRules(teamDir, "")
 	require.NoError(t, err)
 	result, err := teamrules.Reconcile(context.Background(), env.Root, rules)
@@ -197,8 +198,8 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			name = "state write recovers"
 		}
 		t.Run(name, func(t *testing.T) {
-			if readOnlyState && os.Geteuid() == 0 {
-				t.Skip("root can write files despite read-only permissions")
+			if readOnlyState && (os.Geteuid() == 0 || runtime.GOOS == "windows") {
+				t.Skip("requires enforced Unix directory permissions for write-failure injection")
 			}
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -233,10 +234,11 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 			require.Empty(t, first.SessionFile)
 			rawBefore, err := os.ReadFile(filepath.Join(first.SessionPath, "raw.jsonl"))
 			require.NoError(t, err)
-			markerPath := filepath.Join(first.SessionPath, ".recording.json")
 			if readOnlyState {
-				require.NoError(t, os.Chmod(markerPath, 0o400))
-				t.Cleanup(func() { _ = os.Chmod(markerPath, 0o600) })
+				// Atomic replacement depends on directory permissions, not the
+				// old inode's mode. Keep the state readable but prevent publishing.
+				require.NoError(t, os.Chmod(first.SessionPath, 0o500))
+				t.Cleanup(func() { _ = os.Chmod(first.SessionPath, 0o755) })
 			}
 
 			// Learn the native ID while its file is still unavailable. Keep it for daemon discovery.
@@ -274,7 +276,7 @@ func TestPrimeCodexRecording_ReprimeDiscoversDelayedSource(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, pending)
 				assert.Empty(t, pending.SessionFile, "discovery must preserve a recording when its source path cannot yet be saved")
-				require.NoError(t, os.Chmod(markerPath, 0o600))
+				require.NoError(t, os.Chmod(first.SessionPath, 0o755))
 				require.NotNil(t, startSessionRecording(f.projectRoot, agentID, "codex", "", "", nativeID))
 			}
 			found, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)

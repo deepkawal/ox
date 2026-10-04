@@ -8,19 +8,21 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/trace/model"
 )
 
 // CarrierStamp is what a finalize door appends to raw.jsonl just before the
-// recording-state file goes away. Both fields are optional: a door that only
+// recording-state file goes away. Fields are optional: a door that only
 // knows one of them carries that one, and a later stamp wins per field when
 // the file is read.
 type CarrierStamp struct {
+	TraceCapture   *model.Capture
 	NativeSessions []lfs.NativeSession
 	StoppedAt      time.Time
 }
 
 // StampRawCarrier appends one footer record carrying the stamp to rawPath.
-// It is the crash-safe hand-off for the two recording fields the daemon
+// It is the crash-safe hand-off for recording fields the daemon
 // cannot otherwise learn: .recording.json is deleted at SessionEnd, /clear
 // and orphan-sweep time, but raw.jsonl survives into the ledger and every
 // finalize door reads it (ReadSessionFromPath folds the footer's fields into
@@ -42,7 +44,7 @@ type CarrierStamp struct {
 // that merely has no ids must not erase ones an earlier line carried.
 //
 // Every byte goes through RawWriter like any other raw.jsonl write; the
-// only content is ox-minted ids and timestamps, never conversation text.
+// only content is identifiers, timestamps, and byte boundaries, never conversation text.
 //
 // A missing file or an LFS pointer is reported as an error and nothing is
 // written; callers treat the stamp as best-effort and log.
@@ -50,6 +52,11 @@ func StampRawCarrier(rawPath string, stamp CarrierStamp) error {
 	if rawPath == "" {
 		return errors.New("stamp raw carrier: empty path")
 	}
+	return withRawAppendLock(rawPath, func() error { return stampRawCarrier(rawPath, stamp) })
+}
+
+// The append lock covers the newline repair as well as the footer itself.
+func stampRawCarrier(rawPath string, stamp CarrierStamp) error {
 	if lfs.IsPointerFile(rawPath) {
 		return fmt.Errorf("stamp raw carrier: %s is an LFS pointer", rawPath)
 	}
@@ -75,6 +82,17 @@ func StampRawCarrier(rawPath string, stamp CarrierStamp) error {
 		}
 		record["native_sessions"] = generic
 	}
+	if stamp.TraceCapture != nil {
+		data, err := json.Marshal(stamp.TraceCapture)
+		if err != nil {
+			return fmt.Errorf("stamp trace capture: %w", err)
+		}
+		var generic any
+		if err := json.Unmarshal(data, &generic); err != nil {
+			return err
+		}
+		record["trace_capture"] = generic
+	}
 	if len(record) == 1 {
 		return nil // nothing to carry
 	}
@@ -90,7 +108,7 @@ func StampRawCarrier(rawPath string, stamp CarrierStamp) error {
 	if err != nil {
 		return fmt.Errorf("stamp raw carrier: open: %w", err)
 	}
-	if err := w.WriteRaw(record); err != nil {
+	if err := w.writeRaw(record); err != nil {
 		_ = w.Close()
 		return fmt.Errorf("stamp raw carrier: append: %w", err)
 	}

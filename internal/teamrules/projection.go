@@ -17,15 +17,35 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/skillmanager"
 	"github.com/sageox/ox/internal/teamdocs"
 )
 
-const (
-	managedPrefix         = "sageox-team-"
-	projectionStampPrefix = "<!-- ox-team-rule-sha256:"
-	projectionStampSuffix = "; managed by ox from Team Context; edit the source rule, not this projection. -->"
-)
+// managedProjectionName reports whether a filename in a rule root is a Team Rule
+// projection ox wrote — by NAME only; ownership still needs the stamp.
+//
+// Two shapes are accepted because two exist on disk. The current one is
+// <slug>-<hash>-team<ext>: a suffix, matching Team Skills, so that every artifact
+// ox projects out of Team Context is recognizable by one rule instead of one rule
+// per artifact kind. The legacy one is the "sageox-team-" prefix, kept only so a
+// repository that upgrades mid-reconcile can still have its old files swept.
+func managedProjectionName(name, ext string) bool {
+	if !strings.HasSuffix(name, ext) {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimSuffix(name, ext), skillmanager.TeamSuffix) ||
+		strings.HasPrefix(name, skillmanager.LegacyTeamPrefix)
+}
+
+// ignoreProbeName is the path managedPathIgnored asks git about to learn whether
+// this root's projections are covered by an ignore rule. It must match the SAME
+// glob a real projection matches, so it carries the suffix rather than a prefix.
+func ignoreProbeName(ext string) string {
+	return "probe" + skillmanager.TeamSuffix + ext
+}
 
 // ErrProjectionConflict marks a native rule path that ox cannot safely claim.
 // The caller should surface it as settled human-action work, not retry it as an
@@ -131,7 +151,7 @@ func Reconcile(ctx context.Context, projectRoot string, rules []teamdocs.TeamRul
 		}
 
 		desired := map[string][]byte{}
-		protected := managedPathIgnored(ctx, projectRoot, filepath.ToSlash(filepath.Join(p.Root, managedPrefix+"probe"+p.Extension)))
+		protected := managedPathIgnored(ctx, projectRoot, filepath.ToSlash(filepath.Join(p.Root, ignoreProbeName(p.Extension))))
 		for _, rule := range rules {
 			mode := ModeForAgent(p.Agent, rule)
 			if mode != DeliveryNative {
@@ -221,7 +241,7 @@ func HasNativeProjections(projectRoot string) bool {
 			continue
 		}
 		for _, entry := range entries {
-			if !strings.HasPrefix(entry.Name(), managedPrefix) || !strings.HasSuffix(entry.Name(), p.Extension) {
+			if !managedProjectionName(entry.Name(), p.Extension) {
 				continue
 			}
 			if !entry.Type().IsRegular() {
@@ -236,17 +256,56 @@ func HasNativeProjections(projectRoot string) bool {
 	return false
 }
 
+// primeProbeTimeout bounds the single `git check-ignore` ForPrime runs. Prime is
+// the SessionStart critical path, and this is the only subprocess on it — an
+// unbounded one turns a wedged git (an index lock, a stalled network mount)
+// into a coding session that never starts.
+//
+// A timeout falls to "not protected", which is the SAME direction the decision
+// below already takes when the answer is genuinely no: deliver the rule through
+// prime rather than suppress it. Timing out therefore costs a duplicated rule,
+// never a silently missing one.
+//
+// It is a var so a test can shrink it; nothing in production reassigns it.
+var primeProbeTimeout = 2 * time.Second
+
 // ForPrime removes rules already owned by a projection in the active agent's
 // native root and converts any scoped fallback to indexed delivery. It is the
 // second half of the exactly-once contract: projection chooses native-or-prime;
 // session start never duplicates an owned native file while convergence is
 // repairing stale bytes.
 func ForPrime(projectRoot, agent string, rules []teamdocs.TeamRule) []teamdocs.TeamRule {
+	// Protection is probed at most once, lazily, and only if some rule actually
+	// has a native file worth suppressing. Reconcile uses this same probe, so the
+	// two halves of the exactly-once contract cannot answer differently — a
+	// cheaper second signal here would be a new source of truth, which is the
+	// defect class this whole path keeps producing.
+	protected, probed := false, false
+	rootProtected := func(p policy) bool {
+		if !probed {
+			probed = true
+			ctx, cancel := context.WithTimeout(context.Background(), primeProbeTimeout)
+			defer cancel()
+			protected = managedPathIgnored(ctx, projectRoot,
+				filepath.ToSlash(filepath.Join(p.Root, ignoreProbeName(p.Extension))))
+		}
+		return protected
+	}
+
 	out := make([]teamdocs.TeamRule, 0, len(rules))
 	for _, rule := range rules {
 		mode := ModeForAgent(agent, rule)
 		if mode == DeliveryNative && nativePresent(projectRoot, agent, rule) {
-			continue
+			// A native file ox owns is only "delivered" while Reconcile can still
+			// maintain it. Once the root loses its ignore rule, Reconcile refuses
+			// the whole root and the file freezes at whatever text it last held —
+			// so suppressing prime here would strand the rule on a stale copy
+			// forever, reaching the coworker through neither surface honestly.
+			// Falling through delivers it twice in that state, which is the safe
+			// direction: duplicated beats silently frozen.
+			if p, ok := policyFor(agent); !ok || rootProtected(p) {
+				continue
+			}
 		}
 		copy := rule
 		if mode == DeliveryPrimeIndexed || len(rule.Globs) > 0 {
@@ -338,32 +397,16 @@ func render(rule teamdocs.TeamRule, p policy) ([]byte, error) {
 // stampProjection records ownership without requiring a machine-local
 // inventory. The trailer covers every byte before it, including frontmatter,
 // so a local edit invalidates ownership and reconciliation preserves the file.
+//
+// The bytes live in skillmanager alongside the namespace contract: Team Skills
+// need the identical mechanism now that their directory name no longer proves
+// authorship, and two copies of a hash format is how they drift apart.
 func stampProjection(content []byte) []byte {
-	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
-	if len(content) == 0 || content[len(content)-1] != '\n' {
-		content = append(content, '\n')
-	}
-	sum := sha256.Sum256(content)
-	stamp := fmt.Sprintf("%s%x%s\n", projectionStampPrefix, sum, projectionStampSuffix)
-	return append(append([]byte(nil), content...), []byte(stamp)...)
+	return skillmanager.TeamRuleStamp.Apply(content)
 }
 
 func verifiedProjection(content []byte) bool {
-	content = bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
-	marker := []byte("\n" + projectionStampPrefix)
-	markerOffset := bytes.LastIndex(content, marker)
-	if markerOffset < 0 {
-		return false
-	}
-	payload := content[:markerOffset+1]
-	stamp := content[markerOffset+1:]
-	wantLength := len(projectionStampPrefix) + sha256.Size*2 + len(projectionStampSuffix) + 1
-	if len(stamp) != wantLength || !bytes.HasSuffix(stamp, []byte(projectionStampSuffix+"\n")) {
-		return false
-	}
-	wantHash := fmt.Sprintf("%x", sha256.Sum256(payload))
-	gotHash := string(stamp[len(projectionStampPrefix) : len(projectionStampPrefix)+sha256.Size*2])
-	return gotHash == wantHash
+	return skillmanager.TeamRuleStamp.Verifies(content)
 }
 
 // projectionOwned reports whether content is a Team Rule projection ox itself
@@ -396,7 +439,10 @@ func nativeFilename(rule teamdocs.TeamRule, p policy) string {
 		slug = strings.TrimRight(slug[:40], "-")
 	}
 	sum := sha256.Sum256([]byte(rule.Name + "\x00" + filepath.ToSlash(rule.RelPath)))
-	return fmt.Sprintf("%s%s-%x%s", managedPrefix, slug, sum[:4], p.Extension)
+	// SUFFIX, not prefix — the same shape Team Skills use, because one namespace
+	// rule for everything ox projects is worth more than the few characters a
+	// per-artifact exception would save.
+	return fmt.Sprintf("%s-%x%s%s", slug, sum[:4], skillmanager.TeamSuffix, p.Extension)
 }
 
 func managedPathIgnored(ctx context.Context, projectRoot, rel string) bool {
@@ -464,7 +510,7 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, managedPrefix) || !strings.HasSuffix(name, p.Extension) {
+		if !managedProjectionName(name, p.Extension) {
 			continue
 		}
 		if _, keep := desired[name]; keep {
@@ -497,36 +543,10 @@ func reconcileRoot(ctx context.Context, projectRoot, rootPath string, p policy, 
 	return written, removed, errors.Join(conflicts...)
 }
 
-// managedPathTracked reports whether git tracks rel inside projectRoot.
-//
-// `git ls-files --error-unmatch` exits 1 for the ordinary "no tracked path
-// matched" answer and reserves every other outcome for a real failure: a
-// canceled context, a git that is missing or too old, an unreadable index.
-// Collapsing those into "untracked" is what let reconcile overwrite or delete a
-// TRACKED projection, report it applied, and clear the pending state — leaving
-// an uncommitted rule change with nothing scheduled to revisit it. So only exit
-// 1 means untracked; anything else is returned as an error, which reaches the
-// convergence coordinator unwrapped by ErrProjectionConflict and is therefore
-// retried rather than settled.
-//
-// The context check comes first on purpose: killing the child on cancellation
-// surfaces as a signal on Unix and as exit code 1 on Windows, so an expired
-// deadline would otherwise be indistinguishable from a genuine "not tracked".
+// managedPathTracked is gitutil.PathTracked, kept as a local name so the call
+// sites below keep reading as a Team Rule concern.
 func managedPathTracked(ctx context.Context, projectRoot, rel string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", rel)
-	cmd.Dir = projectRoot
-	runErr := cmd.Run()
-	if runErr == nil {
-		return true, nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return false, fmt.Errorf("check whether %s is tracked: %w", rel, ctxErr)
-	}
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("check whether %s is tracked: %w", rel, runErr)
+	return gitutil.PathTracked(ctx, projectRoot, rel)
 }
 
 func atomicWrite(root *os.Root, name string, content []byte) error {
