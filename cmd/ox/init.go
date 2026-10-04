@@ -400,13 +400,13 @@ func runInit() error {
 	var selectedTeamName string
 	if initTeamFlag != "" {
 		// --team has always taken the raw flag value and sent it to the API. Resolving
-		// it against the user's actual teams first means the slug `ox team list` prints
-		// and the name the picker shows both work here, matching every other team-taking
-		// surface, and a typo fails before REPOSITORY SETUP writes anything rather than
-		// as an HTTP 400 after every file has been written and staged. One case is not
-		// covered: in an empty repo ensureInitialCommit has already seeded a commit by
-		// this point, so validating earlier still would require hoisting the endpoint
-		// and auth blocks above it. Tracked separately in #857.
+		// it against the user's teams first means the slug `ox team list` prints and the
+		// name the picker shows both work here, matching every other team-taking surface.
+		// The list is a convenience, not the authority: a value it does not contain is
+		// warned about and passed through for the server to rule on (as `ox invite --team`
+		// does), so a stale local list can never block a registration the server would
+		// accept. Only a value matching several teams fails here, and it fails before
+		// ensureInitialCommit or REPOSITORY SETUP has written anything.
 		memberships, fetchErr := fetchTeamMemberships()
 		if fetchErr != nil {
 			// The picker path below reports a failed fetch and asks whether to

@@ -282,19 +282,28 @@ func TestFormatTeamCandidates_CapsTheList(t *testing.T) {
 	assert.NotContains(t, atCap, "more")
 }
 
-func TestUnknownTeamError(t *testing.T) {
-	// an account with teams gets the candidates it could have typed
-	withTeams := unknownTeamError("no-such-team", []api.TeamMembership{
+func TestUnmatchedTeamWarning(t *testing.T) {
+	// the warning names what the user typed and what would have matched, and says the
+	// server decides — so it reads as a heads-up, not a refusal
+	got := unmatchedTeamWarning("no-such-team", []api.TeamMembership{
 		{ID: "team_abc123", Name: "Platform", Slug: "platform"},
 	})
-	require.Error(t, withTeams)
-	assert.Contains(t, withTeams.Error(), `unknown team "no-such-team"`)
-	assert.Contains(t, withTeams.Error(), "Platform (platform, team_abc123)")
+	assert.Contains(t, got, `--team "no-such-team"`)
+	assert.Contains(t, got, "Platform (platform, team_abc123)")
+	assert.Contains(t, got, "the server will decide")
+	assert.NotContains(t, strings.ToLower(got), "unknown team", "a pass-through must not read as a rejection")
+
+	// the typed value is the user's own text, but %q keeps a control byte from
+	// reaching the terminal anyway
+	escaped := unmatchedTeamWarning("a\x1b[2Jb", []api.TeamMembership{{ID: "team_abc123", Name: "Platform"}})
+	assert.NotContains(t, escaped, "\x1b")
 }
 
-// TestResolveTeamFlag_States pins which fetch outcomes may reject --team: only a
-// NON-EMPTY membership list may. Every other outcome passes the trimmed value
-// through to the server, which is the authority on team names.
+// TestResolveTeamFlag_States pins which outcomes may reject --team: only AMBIGUITY
+// may. Every other outcome resolves it or passes the trimmed value through to the
+// server, which is the authority on which teams a token may register into. A value
+// the (non-empty) list does not contain passes through WITH a warning, matching
+// `ox invite --team`.
 //
 // The `why` field is the reason a case exists, and is used as the assertion
 // message so a regression reports the rule it broke rather than just a diff.
@@ -312,6 +321,7 @@ func TestResolveTeamFlag_States(t *testing.T) {
 		wantID   string
 		wantName string
 		wantErr  []string // substrings the error must contain; empty means no error
+		wantWarn []string // substrings the warning must contain; empty means nothing is printed
 		why      string
 	}{
 		{
@@ -349,14 +359,20 @@ func TestResolveTeamFlag_States(t *testing.T) {
 			why:      "resolution must consider the slug, not just the name",
 		},
 		{
-			name:  "authoritative list rejects a value it does not contain",
-			flag:  "no-such-team",
-			teams: teams,
-			wantErr: []string{
-				`unknown team "no-such-team"`,
+			// A token may be authorized to register into a team that
+			// /api/v1/cli/repos does not list, and the list can lag a team that is
+			// still provisioning. The server is the authority, so the value goes to
+			// it; the warning is what keeps a typo from being silent.
+			name:   "a value the list does not contain passes through with a warning",
+			flag:   "  no-such-team ",
+			teams:  teams,
+			wantID: "no-such-team",
+			wantWarn: []string{
+				`--team "no-such-team"`,
 				"Platform (platform, team_abc123)",
+				"the server will decide",
 			},
-			why: "a non-empty list is authoritative, so an absent value is a typo",
+			why: "the local list is a convenience, not the authority on what the server accepts",
 		},
 		{
 			name: "a value matching two teams is rejected, not picked",
@@ -372,6 +388,13 @@ func TestResolveTeamFlag_States(t *testing.T) {
 			why: "the list is unique on no field; picking one silently binds the wrong tenant",
 		},
 		{
+			name:   "a resolved team prints no warning",
+			flag:   "platform",
+			teams:  teams,
+			wantID: "team_abc123", wantName: "Platform",
+			why: "a clean resolution must stay quiet",
+		},
+		{
 			name:   "a list of only ID-less teams passes through instead of rejecting",
 			flag:   "ghost",
 			teams:  []api.TeamMembership{{Name: "Ghost", Slug: "ghost"}},
@@ -379,20 +402,36 @@ func TestResolveTeamFlag_States(t *testing.T) {
 			why:    "a team ox cannot register against is not an authoritative answer",
 		},
 		{
+			// Passing "Ghost" through is fine; RESOLVING it to the ID-less team is not.
+			// A resolved empty ID would be dropped from the request while the resolved
+			// NAME was still written to config and printed as the registered team.
 			name: "an ID-less team never resolves, even matching by name",
 			flag: "Ghost",
 			teams: []api.TeamMembership{
 				{ID: "team_abc123", Name: "Platform", Slug: "platform"},
 				{Name: "Ghost", Slug: "ghost"},
 			},
-			wantErr: []string{`unknown team "Ghost"`},
-			why:     "an empty ID is dropped from the request but the name is still written to config",
+			wantID:   "Ghost",
+			wantName: "",
+			wantWarn: []string{`--team "Ghost"`},
+			why:      "an empty ID is dropped from the request but the name is still written to config",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id, name, err := resolveTeamFlag(tt.flag, tt.teams, tt.fetchErr)
+			var id, name string
+			var err error
+			warned := captureStderr(t, func() {
+				id, name, err = resolveTeamFlag(tt.flag, tt.teams, tt.fetchErr)
+			})
+
+			if len(tt.wantWarn) == 0 {
+				assert.Empty(t, warned, "no warning expected")
+			}
+			for _, want := range tt.wantWarn {
+				assert.Contains(t, warned, want, tt.why)
+			}
 
 			if len(tt.wantErr) > 0 {
 				require.Error(t, err, tt.why)

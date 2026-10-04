@@ -343,11 +343,13 @@ func formatTeamCandidates(teams []api.TeamMembership) string {
 	return strings.Join(parts, ", ")
 }
 
-// unknownTeamError reports a --team value that a known, non-empty membership list
-// does not contain. Callers must not use it for an empty list: an empty list means
-// "nothing visible", not "no teams". See resolveTeamFlag.
-func unknownTeamError(query string, teams []api.TeamMembership) error {
-	return fmt.Errorf("unknown team %q\n\nYour teams: %s", query, formatTeamCandidates(teams))
+// unmatchedTeamWarning tells the user a --team value matched none of the teams in
+// their list and is being handed to the server as typed. It is a warning, not an
+// error: the list is this machine's view of the account, and the server — which
+// owns team uniqueness and who may register into what — rules on the value.
+func unmatchedTeamWarning(query string, teams []api.TeamMembership) string {
+	return fmt.Sprintf("--team %q does not match a team in your list (%s); the server will decide whether to accept it",
+		query, formatTeamCandidates(teams))
 }
 
 // ambiguousTeamError reports a --team value that identifies more than one team.
@@ -360,23 +362,33 @@ func ambiguousTeamError(query string, matches []api.TeamMembership) error {
 }
 
 // resolveTeamFlag decides what --team resolves to, given the outcome of fetching the
-// user's memberships. Only ONE of the three outcomes may reject the flag:
+// user's memberships.
 //
-//	fetchErr != nil    the API could not be reached: nothing here is knowable.
-//	no usable teams    no usable answer; see below.
-//	usable teams > 0   authoritative: a value absent from this list is a typo, and a
-//	                   value matching several of them is not a choice ox may make.
+// The membership list is a convenience, not the authority. The server decides which
+// teams a token may register into, and this machine's list can lag it: a team whose
+// context is still provisioning, or a token authorized for a team that
+// /api/v1/cli/repos does not report. `ox invite --team` makes the same call ("unknown
+// locally is not an error"), so a value the list does not contain is passed through
+// rather than rejected. The outcomes:
+//
+//	fetchErr != nil    the API could not be reached: pass the value through.
+//	no usable teams    nothing to compare against: pass the value through. ox treats
+//	                   "no teams" as continuable everywhere else — on the picker path
+//	                   promptNoTeams offers "Continue (a new team will be created)".
+//	one match          resolved to that team's ID and name.
+//	no match           warn, then pass the trimmed value through unresolved. The name
+//	                   stays empty, so init never writes a team name into config for a
+//	                   team it did not resolve.
+//	several matches    ERROR. This is the one outcome that fails locally: the list shows
+//	                   two teams answering to the value, and choosing between them is a
+//	                   decision about which tenant the repo lands in, which ox must not
+//	                   make for the user.
 //
 // "Usable" excludes memberships with an empty ID, which cannot be registered against
 // at all; see usableTeams.
 //
-// An empty list does not reject, because ox treats "no teams" as a continuable state
-// everywhere else: on the picker path promptNoTeams offers "Continue (a new team will
-// be created)" and proceeds. Rejecting would make --team the only surface on which
-// zero teams is fatal. Nor is an empty list proof of zero teams — the same shape
-// covers an account whose team context is still provisioning. Passing through costs a
-// less precise server-side error for an account that truly has none; rejecting costs
-// a blocked init for one whose teams simply have not appeared yet.
+// The no-match outcome prints a warning itself, so it is visible however the caller
+// reaches it.
 func resolveTeamFlag(flag string, teams []api.TeamMembership, fetchErr error) (teamID, teamName string, err error) {
 	trimmed := strings.TrimSpace(flag)
 
@@ -393,7 +405,9 @@ func resolveTeamFlag(flag string, teams []api.TeamMembership, fetchErr error) (t
 	matches := resolveTeamMembership(candidates, trimmed)
 	switch len(matches) {
 	case 0:
-		return "", "", unknownTeamError(trimmed, candidates)
+		slog.Debug("--team matches no team in the membership list; passing it through", "team", trimmed, "teams", len(candidates))
+		cli.PrintWarning(unmatchedTeamWarning(trimmed, candidates))
+		return trimmed, "", nil
 	case 1:
 		return matches[0].ID, matches[0].Name, nil
 	default:
