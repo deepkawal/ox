@@ -9,12 +9,12 @@
     "exceptions": [
       {
         "path": "internal/ledger/github_data.go",
-        "reason": "PR #936: writeGitHubPR now returns the snapshot path, so its pre-existing marshal error return re-entered the diff; PRFile is plain data and json.MarshalIndent cannot fail on it. The create-dir and write error returns are directly tested.",
+        "reason": "PR #936: writeGitHubPR now returns the snapshot path, so its pre-existing marshal error return re-entered the diff; PRFile is plain data and json.MarshalIndent cannot fail on it. The create-dir error return is directly tested (TestWriteGitHubPR_CreateDirFails); the write error return is tested wherever directory permissions are enforced (TestWriteGitHubPR_WriteFails).",
         "expires": "2026-11-04"
       },
       {
         "path": "internal/ledger/github_sync.go",
-        "reason": "PR #936: the remove-superseded-snapshot warn is not portably reachable (the write and the remove share a directory, so anything that breaks the remove breaks the write first). Survival of a failed remove is tested where the platform allows.",
+        "reason": "PR #936: the remove-superseded-snapshot warn is reachable only where directory permissions are enforced (not Windows or uid 0); TestBackfillPRCommits_SurvivesRemoveFailure covers it elsewhere by pre-writing the enriched snapshot so a read-only directory can break only the remove.",
         "expires": "2026-11-04"
       },
       {
