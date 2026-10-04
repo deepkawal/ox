@@ -428,6 +428,14 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		// It is here because the cost of it ever being wrong is deleting the
 		// snapshot we just wrote.
 		if newPath != info.path {
+			// writeGitHubPR trusts a file already at newPath, so a torn one
+			// left by an earlier crash would pass for the enriched snapshot.
+			// Fail closed: the original goes only once its replacement reads
+			// back with the commits, otherwise the PR could vanish.
+			if !snapshotHoldsCommits(newPath, pr.Number) {
+				logger.Warn("keeping PR snapshot: replacement is not intact", "pr", pr.Number, "path", info.path, "replacement", newPath)
+				continue
+			}
 			if rmErr := os.Remove(info.path); rmErr != nil && !os.IsNotExist(rmErr) {
 				logger.Warn("remove superseded PR snapshot failed", "pr", pr.Number, "path", info.path, "error", rmErr)
 			}
@@ -438,6 +446,20 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 	}
 
 	return backfilled, nil
+}
+
+// snapshotHoldsCommits reports whether path parses as a snapshot of PR number
+// that carries commits.
+func snapshotHoldsCommits(path string, number int) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var stub struct {
+		Number  int               `json:"number"`
+		Commits []json.RawMessage `json:"commits"`
+	}
+	return json.Unmarshal(data, &stub) == nil && stub.Number == number && len(stub.Commits) > 0
 }
 
 func fetchPRCommits(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRCommit {

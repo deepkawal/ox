@@ -1662,3 +1662,114 @@ func TestBackfillPRCommits_KeepsSnapshotWhenWriteFails(t *testing.T) {
 		}
 	}
 }
+
+// TestBackfillPRCommits_KeepsSnapshotUnlessReplacementIsIntact pins the
+// delete's precondition: the snapshot that was enriched may only go once the
+// file that replaces it reads back as that PR's snapshot, with the commits.
+//
+// writeGitHubPR treats an existing file at the target name as "already
+// written", so whatever sits there passes for the enriched snapshot — a
+// zero-length file left by a crash between create and write, say. Removing the
+// commit-less snapshot on that evidence would leave the Ledger with no
+// readable copy of the PR, and the next incremental sync would never re-fetch
+// it.
+//
+// Failure prevented: a PR vanishing from the Ledger after a crash during an
+// earlier backfill write. Portable: no permission tricks, so it also runs on
+// Windows and as root.
+func TestBackfillPRCommits_KeepsSnapshotUnlessReplacementIsIntact(t *testing.T) {
+	tests := []struct {
+		name string
+		// plant puts something at the path the enriched snapshot will be given
+		plant func(t *testing.T, path string)
+	}{
+		{
+			name: "zero-length file left by a crash",
+			plant: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, nil, 0644); err != nil {
+					t.Fatalf("plant: %v", err)
+				}
+			},
+		},
+		{
+			name: "truncated json",
+			plant: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte(`{"number": 670, "commits": [`), 0644); err != nil {
+					t.Fatalf("plant: %v", err)
+				}
+			},
+		},
+		{
+			name: "snapshot without commits",
+			plant: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte(`{"number": 670, "state": "merged"}`), 0644); err != nil {
+					t.Fatalf("plant: %v", err)
+				}
+			},
+		},
+		{
+			name: "snapshot of a different PR",
+			plant: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte(`{"number": 671, "commits": [{"sha": "x"}]}`), 0644); err != nil {
+					t.Fatalf("plant: %v", err)
+				}
+			},
+		},
+		{
+			name: "unreadable entry",
+			plant: func(t *testing.T, path string) {
+				if err := os.Mkdir(path, 0755); err != nil {
+					t.Fatalf("plant: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ledgerPath := t.TempDir()
+			now := time.Now().UTC().Truncate(time.Second)
+
+			commits := []PRCommit{{SHA: "fff670", Author: "gina", Date: now, Msg: "backfilled commit"}}
+			commitless := &PRFile{
+				Number: 670, Title: "Merged before commits were synced", State: "merged", Author: "gina",
+				CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeCommit: "670head",
+			}
+			enriched := *commitless
+			enriched.Commits = commits
+
+			if err := WriteGitHubPR(ledgerPath, commitless); err != nil {
+				t.Fatalf("write commit-less snapshot: %v", err)
+			}
+			dir := DateDir(ledgerPath, now, "pr")
+			original := hashSnapshotPaths(t, dir, 670)
+			if len(original) != 1 {
+				t.Fatalf("expected one starting snapshot, got %d", len(original))
+			}
+
+			// learn the name the enriched snapshot will get by writing it to a
+			// scratch ledger, then plant the broken replacement under that name
+			scratchPath, err := writeGitHubPR(t.TempDir(), &enriched)
+			if err != nil {
+				t.Fatalf("write scratch snapshot: %v", err)
+			}
+			tt.plant(t, filepath.Join(dir, filepath.Base(scratchPath)))
+
+			fetcher := &mockFetcher{prCommits: map[int][]FetchedPRCommit{
+				670: {FetchedPRCommit(commits[0])},
+			}}
+
+			backfilled, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", slog.Default())
+			if err != nil {
+				t.Fatalf("BackfillPRCommits: %v", err)
+			}
+			if backfilled != 0 {
+				t.Errorf("expected a replacement that is not intact to count as not backfilled, got %d", backfilled)
+			}
+			if _, err := os.Stat(original[0]); err != nil {
+				t.Errorf("the commit-less snapshot was removed although its replacement is not intact: %v", err)
+			}
+		})
+	}
+}
