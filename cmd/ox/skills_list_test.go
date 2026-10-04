@@ -37,7 +37,13 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 	const root = ".claude/skills"
 	writeSkillDir(t, repo, root, skillmanager.CLIPrefix+"plan", manifestWithDescription("ox-cli-plan", "plan things"))
 	writeSkillDir(t, repo, root, skillmanager.CommittedOnRamp, manifestWithDescription("sageox", "the on-ramp"))
-	writeSkillDir(t, repo, root, skillmanager.TeamPrefix+"deploy", manifestWithDescription("sageox-team-deploy", "how we deploy"))
+	// A Team Skill is proved by its STAMP, not by its name. "-team" is ordinary
+	// English, so an unstamped `deploy-team` is somebody's hand-authored skill and
+	// must classify as local — see the negative control below.
+	writeSkillDir(t, repo, root, "deploy"+skillmanager.TeamSuffix,
+		string(skillmanager.TeamSkillStamp.Apply([]byte(manifestWithDescription("deploy", "how we deploy")))))
+	writeSkillDir(t, repo, root, "notify"+skillmanager.TeamSuffix,
+		manifestWithDescription("notify-team", "mine, and it merely LOOKS like team content"))
 	writeSkillDir(t, repo, root, "my-own-skill", manifestWithDescription("my-own-skill", "mine, hand written"))
 	// An ordinary, unprefixed name — the shape an ox catalog skill takes — but
 	// carrying NO ownership evidence. A catalog-shaped NAME is availability, not
@@ -51,11 +57,13 @@ func TestCollectInstalledSkills_ClassifiesEveryProvenance(t *testing.T) {
 	for _, row := range got.Skills {
 		byName[row.Name] = row
 	}
-	require.Len(t, byName, 5)
+	require.Len(t, byName, 6)
 	require.Equal(t, provenanceOx, byName[skillmanager.CLIPrefix+"plan"].Provenance)
 	require.Equal(t, provenanceOx, byName[skillmanager.CommittedOnRamp].Provenance,
 		"the committed on-ramp is deliberately unprefixed; a prefix-only rule files ox's own file under local")
-	require.Equal(t, provenanceTeam, byName[skillmanager.TeamPrefix+"deploy"].Provenance)
+	require.Equal(t, provenanceTeam, byName["deploy"+skillmanager.TeamSuffix].Provenance)
+	require.Equal(t, provenanceLocal, byName["notify"+skillmanager.TeamSuffix].Provenance,
+		"a name wearing the team suffix without ox's stamp belongs to whoever wrote it")
 	require.Equal(t, provenanceLocal, byName["my-own-skill"].Provenance)
 	require.Equal(t, provenanceLocal, byName[unprefixedSkillName].Provenance,
 		"an unprefixed name alone claimed a hand-authored skill")
@@ -192,7 +200,7 @@ func TestCollectInstalledSkills_WillNotReadThroughARootOutsideTheRepository(t *t
 
 			for _, asJSON := range []bool{false, true} {
 				var buf strings.Builder
-				require.NoError(t, emitSkillsList(&buf, got, asJSON))
+				require.NoError(t, emitSkillsList(&buf, got, asJSON, false))
 				require.NotContains(t, buf.String(), stolenDescription,
 					"json=%v: a SKILL.md description from outside the repository reached the reader", asJSON)
 				require.NotContains(t, buf.String(), "stolen",
@@ -240,7 +248,7 @@ func TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput(t *tes
 				"publish matches a user's argument against")
 
 		var buf strings.Builder
-		require.NoError(t, emitSkillsList(&buf, got, false))
+		require.NoError(t, emitSkillsList(&buf, got, false, false))
 
 		row := rowContaining(t, buf.String(), "evil")
 		for _, r := range row {
@@ -263,7 +271,7 @@ func TestEmitSkillsList_RepositoryControlledTextCannotForgeTerminalOutput(t *tes
 		writeSkillDir(t, repo, ".claude/skills", name, manifestWithDescription("v", "d"))
 
 		var buf strings.Builder
-		require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(repo, []string{".claude/skills"}), false))
+		require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(repo, []string{".claude/skills"}), false, false))
 
 		require.Contains(t, rowContaining(t, buf.String(), "visible"), "visible-name",
 			"the name was clipped before it was sanitized, so the column budget went to invisible bytes")
@@ -378,7 +386,11 @@ func TestEmitSkillsList_FitsEightyColumns(t *testing.T) {
 	out := skillsListOutput{
 		Roots: []string{".claude/skills"},
 		Skills: []installedSkillRow{
-			{Name: "ox-cli-session-review", Provenance: provenanceOx,
+			// provenanceTeam, not provenanceOx: an uncurated ox skill is hidden
+			// by default (see TestEmitSkillsList_CuratesOxSkillsByDefault), which
+			// would make this row vanish from the table this test renders and
+			// prove nothing about width.
+			{Name: "team-skill-review", Provenance: provenanceTeam,
 				Description: strings.Repeat("a very long description that keeps going ", 8)},
 			{Name: strings.Repeat("long-skill-name-", 6), Provenance: provenanceLocal, Description: "short"},
 		},
@@ -387,7 +399,7 @@ func TestEmitSkillsList_FitsEightyColumns(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	require.NoError(t, emitSkillsList(&buf, out, false))
+	require.NoError(t, emitSkillsList(&buf, out, false, false))
 
 	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
 		require.LessOrEqual(t, len([]rune(stripANSI(line))), skillsTableWidth,
@@ -401,7 +413,7 @@ func TestEmitSkillsList_FitsEightyColumns(t *testing.T) {
 // BYTES rather than the struct that produced them.
 func TestSkillsListJSON_AlwaysAnswersEveryQuestionItCanAnswer(t *testing.T) {
 	var buf strings.Builder
-	require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(t.TempDir(), nil), true))
+	require.NoError(t, emitSkillsList(&buf, collectInstalledSkills(t.TempDir(), nil), true, false))
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(buf.String()), &got), "output was not JSON: %q", buf.String())
@@ -488,7 +500,7 @@ func TestSkillsListHelpers_CoverDefensiveAndFormattingBoundaries(t *testing.T) {
 			Guidance: "Run ox doctor to repair it.",
 		}
 		var buf strings.Builder
-		require.NoError(t, emitSkillsList(&buf, out, false))
+		require.NoError(t, emitSkillsList(&buf, out, false, false))
 		rendered := stripANSI(buf.String())
 		require.Contains(t, rendered, "Directories ox could not read")
 		require.Contains(t, rendered, "Run ox doctor")
@@ -509,9 +521,9 @@ func TestSkillsListHelpers_CoverDefensiveAndFormattingBoundaries(t *testing.T) {
 		require.NoError(t, err)
 		defer func() { require.NoError(t, repo.Close()) }()
 
-		description, owned, isSkill := skillManifestDescription(repo, "missing")
+		description, provenance, isSkill := skillManifestDescription(repo, "missing")
 		require.Empty(t, description)
-		require.False(t, owned)
+		require.Empty(t, provenance)
 		require.False(t, isSkill)
 	})
 }

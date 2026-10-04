@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/errkind"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/spf13/cobra"
 )
@@ -200,8 +200,11 @@ func runTeamMembers(cmd *cobra.Command, args []string) error {
 	// EnsureValidTokenForEndpoint also proactively refreshes a near-expired token
 	// (GetTokenForEndpoint would have sent it stale and eaten a 401).
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
-	if err != nil || token == nil || token.AccessToken == "" {
-		return fmt.Errorf("not authenticated — run 'ox login' first")
+	if err != nil {
+		return fmt.Errorf("load credentials: %w", err)
+	}
+	if token == nil || token.AccessToken == "" {
+		return errkind.Errorf(errkind.NotLoggedIn, "not authenticated — run 'ox login' first")
 	}
 	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(token.AccessToken)
 
@@ -262,9 +265,7 @@ func writeRosterJSON(w io.Writer, resp *api.TeamRosterResponse, available bool) 
 			env.Members = resp.Members
 		}
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(env)
+	return cli.PrintJSONTo(w, env)
 }
 
 func renderRosterTable(w io.Writer, resp *api.TeamRosterResponse, label string) {
@@ -574,9 +575,7 @@ func writeTeamShowJSON(w io.Writer, c teamCard, count int, countKnown bool, dash
 		DashboardURL:       dashboard,
 		Published:          c.published,
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(env)
+	return cli.PrintJSONTo(w, env)
 }
 
 func renderTeamShow(w io.Writer, c teamCard, count int, countKnown bool, dashboard string) {

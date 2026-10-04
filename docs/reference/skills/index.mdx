@@ -1,7 +1,7 @@
 ---
 title: "ox skills"
 description: "CLI reference for ox skills"
-sidebar_position: 90
+sidebar_position: 98
 ---
 
 ## ox skills
@@ -19,6 +19,10 @@ missing, which of the several possible reasons is the actual one. "approve" and
 "revoke" are the trust boundary for runnable team-skill content; "publish" sends
 a skill you wrote the other way, into your team's Team Context.
 
+```
+ox skills [flags]
+```
+
 ### Options
 
 ```
@@ -28,7 +32,7 @@ a skill you wrote the other way, into your team's Team Context.
 ### Options inherited from parent commands
 
 ```
-  -c, --config string    config file path (default: .sageox/config.yaml)
+  -c, --config string    user config file (overrides OX_USER_CONFIG)
       --json             output in JSON format (default: false)
       --no-input         disable prompts and terminal UI; provide required input with arguments or flags
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)

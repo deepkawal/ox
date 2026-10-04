@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### New
+
+- **AI coworkers can read a screen walkthrough without watching it** — `ox conversation walkthrough <id>` turns a walkthrough recorded with SageOx Desktop into a short timeline of what was clicked, what the pointer rested on, which page was showing, and the keyframe stills, each tied to the moment in the narration. "What was on screen when they said this?" becomes one command. A new `ox-cli-walkthrough` skill teaches coworkers to use it, and when part of a recording's screen data is missing, ox says what is missing instead of guessing.
+
+### Changed
+
+- **`ox plan feedback show --json` returns `{"items": [...], "corrupt_rounds": [...]}`** instead of a bare array, so a damaged review round is reported rather than silently skipped.
+
+### Fixed
+
+- **Plan review answers reach your team, and you can see when they have** — the review page now says "synced to your team" or "saved on the author's machine, not yet synced" instead of assuming success. A review that couldn't be pushed is retried automatically the next time an AI coworker session starts.
+- **Review answers are no longer lost or doubled** — resubmitting after a reload or a double-click sends the same round once. Two open tabs keep each other's unsent marks. Applying the same exported review twice is a no-op.
+- **Resolved review items stay resolved across machines** — each resolution is saved as its own file, so syncing two machines can no longer drop one.
+
+## [0.20.0] - 2026-09-30
+
+Comment on exact words in a plan review, hand your AI coworker a SageOx recording link, and stop teammates' sessions from being rewritten on your machine.
+
+### New
+
+- **Comment on exact words in a plan review** — in `ox plan review`, drag across a phrase or double-click a word to comment on just that text. A plain click still marks the whole section, and your AI coworker sees the quoted words with your note.
+- **Paste a SageOx link and your AI coworker opens the recording** — `ox conversation` commands accept sageox.ai recording and share links. `ox conversation transcript --frames` also shows what was on screen and what the narrator pointed at.
+
+### Improved
+
+- **`ox doctor` fails when your setup does** — it now exits non-zero when checks fail or ox isn't set up, including with `--json`, so scripts stop instead of carrying on.
+
+### Fixed
+
+- **Opening a teammate's session no longer rewrites it** — downloading or viewing a session used to regenerate its title and summary on your machine and publish them over the original.
+- **A failed summary is retried instead of written off** — `ox doctor` and `ox session repair-meta-summary` no longer mark sessions as unrecoverable while they wait for a summary. Empty sessions left behind by 0.17 and 0.18 are settled once as brief sessions.
+- **Ledger sync recovers when it falls far behind** — it carries an interrupted update through to the end instead of getting stuck and asking for manual git repair.
+- **`--json` and `OX_JSON=1` work on every command** — and `--json=false` turns JSON off when your AI coworker would otherwise get it by default.
+- **`--config` now selects your preferences file** — reads and writes use the file you name, and a missing or malformed file stops the command instead of being silently ignored.
+
+### Security
+
+- **Credential output stays redacted in recorded sessions** — output from commands that print credentials, such as `aws configure export-credentials`, is now reliably redacted even when a tool's request and its result are captured separately.
+- **Recordings and team context open only for your team** — `ox conversation` and `ox agent team-ctx` check that you're signed in and still a member of the repo's team before showing anything.
+
+### Privacy
+
+- **Usage data now says which failure it was** — when a command fails, its event names the failure in ox's own wording or by its error type, with no values filled in: never arguments, paths, or anything you typed. `ox config get telemetry` lists what's sent.
+- **Usage data records how a plan review ended** — approved, timed out, or closed, with counts of comments and highlights; never their text.
+
+## [0.19.0] - 2026-09-28
+
+Sessions that never captured any work stay out of your Ledger again, and ox now sends usage data, which you can turn off.
+
+### Privacy
+
+- **ox now sends usage data to PostHog** — which commands run, how long they take, and whether they worked, counted per install and per team; never your code, arguments, file paths, or error messages. `ox config get telemetry` lists what's sent, and `ox config set telemetry off` or `DO_NOT_TRACK=1` turns it off.
+
+### Fixed
+
+- **Recordings with no work in them stay out of your Ledger** — since 0.17.0, a session that ended before anything happened, such as the short-lived helper processes some launchers start beside each chat, was summarized and saved as a blank, untitled session. ox skips them again.
+
+## [0.18.0] - 2026-09-24
+
+Team skills now lead with their own name, plans are for any work your team executes, and `ox upgrade` confirms you actually got the new version.
+
+### New
+
+- **Experimental Claude Code trace attachments** — opted-in recordings can include compressed execution traces and events in the Ledger, with identity attributes removed. Paused intervals are excluded, retries preserve the stop boundary, and trace failures do not block the recording. Enablement remains local; no project settings are changed.
+
+### Improved
+
+- **Team skills lead with their own name** — a skill your team publishes as `grill-me` is now `/grill-me-team` instead of `/sageox-team-grill-me`, and `ox skills list` shows the name that actually works. Team Rules take the same `-team` suffix; old directories are removed automatically.
+- **Plans are for any work your team executes** — `ox plan` help and the guidance your AI coworker gets now name design, GTM, rollout, and engineering plans alike, not just implementation plans.
+
+### Deprecated
+
+- **External adapters: `rules_installer` removal is postponed** — 0.17.0 said this release would stop calling it; ox still does, for adapters that declare no `rule_targets`. Declare `rule_targets` now: the fallback will be removed in a later release.
+
+### Fixed
+
+- **`ox upgrade` and the installer confirm you're on the new ox** — both could report success while an older ox kept running; now they check the ox your shell runs and name the stale copy if it isn't the new one. `go install` works again, too.
+- **Status stops reporting a Ledger problem after it's fixed** — once a Ledger you repaired syncs again, `ox status`, `ox daemon status`, and `ox doctor` stop showing its conflict, suspended sync, and last error.
+- **A team skill never overwrites one you wrote** — if your repo already has a committed skill at the name a team skill wants, ox leaves it alone and reports the clash, and `ox doctor` warns when git hides a skill you named `*-team` from your teammates.
+- **Plan checks fit what you saved** — saving a mockup, review sheet, or evidence page no longer runs plan-only checks or says it saved a plan, and `ox plan lint` and `ox plan render` take `--kind` so the check before saving matches the one after.
+- **`ox murmur` says it's safe to run while planning** — its note goes to your Ledger, never your project, but AI coworkers in plan mode were skipping it as if it changed your repo.
+- **Concurrent updates no longer leave a recording's state unreadable** — two ox processes updating the same recording at once could corrupt its saved state; errors about it now also name the file.
+
+## [0.17.1] - 2026-09-22
+
+Your team can install a curated add-on once and every teammate's AI coworker gets it, what ox tells you about your coworkers and your team rules is now true, and the lists you read every day fit on a screen.
+
+### New
+
+- **`ox addons` — install a curated add-on once, for the whole team** — pick an add-on and ox writes it into your Team Context, so every repo on the team receives it and every teammate's AI coworker sees the same selection. `ox sync` distributes it; there is no per-repo step and no second sync command to learn. Three add-ons ship today: `agent-toolkit`, for standing up a hosted AI chat agent across Slack and Nostr; `post-cutoff`, a shelf of what your team has adopted that postdates your model's training; and `post-cutoff-jev`, one brief on typed-decision models.
+- **Updates replace, and say what they replaced** — `ox addons update` overwrites the files an add-on owns and drops the ones its new version stopped shipping. If your team edited one, ox names it before overwriting so the change is one `git log -p` away instead of silently gone. ox never touches a file it doesn't own: a name that collides with something you wrote is refused, not merged.
+- **An add-on is skills, rules, and the context each skill carries** — the context is the point: it ships *inside* the skill that needs it, so an AI coworker reads it exactly when the work calls for it. It is not a dump into your Team Context.
+- **`ox skills list` shows the skills you actually chose** — your team's first, yours next, and only ox's most useful ones last, with the rest a `--all` away. Descriptions now get up to three lines instead of stopping mid-sentence, and it points you at `ox addons` when you want more.
+- **`ox addons list` and `ox skills status` read like a page, not a dump** — full descriptions, aligned columns, relative sync times, and nothing repeated back at you that the heading already said.
+- **`ox status` lists your other teams as a table** — one line per team with visibility, membership, and sync state, so the team that needs attention is the one that looks different. `--verbose` keeps the detailed cards.
+- **`--json` is readable when you run it yourself** — syntax-colored at a terminal, and byte-exact plain JSON the moment it is piped, redirected, or read by an AI coworker.
+
+### Fixed
+
+- **AI coworkers can discover the bulletin board before it syncs** — enrolled coworkers now learn how to post at session start. `ox guide bulletin` explains posting, reading, expiry, and troubleshooting.
+- **`ox adapter list` tells the truth about your AI coworkers** — it understated what 8 of the 10 bundled adapters can do, including Claude Code, so anyone choosing a coding agent from that table was reading fiction.
+- **A team rule can no longer stop reaching anyone** — if a repo's ignore rules stopped covering the managed rule folder, the rule froze in place *and* went unmentioned at session start, arriving through neither path while both looked healthy. It now always arrives at least once.
+- **A stuck `git` can no longer hang session start** — the check ox runs while priming had no time limit, so a wedged index lock or stalled network drive meant a coding session that simply never began.
+- **An approval that could never be satisfied** — in a checkout with no `origin` remote, a team skill could look approvable to `ox skills approve` while being invisible to the reconciler that had to act on it.
+- **A syncing outage no longer looks like a broken setup** — when the server returns an error, ox now recognizes it as temporary and retries, instead of suspending sync and telling you to go fix a checkout that was never wrong.
+- **A false data-loss alarm is gone** — renaming plans (which `ox plan backfill` does routinely) was reported as a wipe of your saved plans and sessions, on every check, for as long as the commit stayed in recent history. ox now asks whether anything was actually lost.
+- **Commands you don't have access to are hidden, not just unlisted** — a feature-gated command no longer appears in help or completions for accounts that cannot run it.
+
 ## [0.17.0] - 2026-09-21
 
 Team rules now load natively in your coding tool and a skill you wrote can reach your whole team with one command, ox behaves predictably when a script, CI job, or AI coworker is driving it, and refreshing a large Ledger takes seconds instead of hours.
